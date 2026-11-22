@@ -1,0 +1,120 @@
+# kubectl apply -f k8s/   (after creating the secret, see secret.example.yaml)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: supportops-agent
+  labels: {app: supportops-agent}
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}     # never drop capacity during a rollout
+  selector:
+    matchLabels: {app: supportops-agent}
+  template:
+    metadata:
+      labels: {app: supportops-agent}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false               # the app needs no Kubernetes API access
+      terminationGracePeriodSeconds: 90                 # let in-flight agent runs (can take 30-60s) finish
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: api
+          image: ghcr.io/YOUR_ORG/supportops-agent:REPLACE_WITH_GIT_SHA   # immutable tag, never :latest
+          ports: [{containerPort: 8080, name: http}]
+          envFrom:
+            - secretRef: {name: supportops-secrets}      # ANTHROPIC_API_KEY, API_KEYS
+          env:
+            - {name: SUPPORTOPS_MODEL, value: claude-opus-5-5}
+            - {name: RATE_PER_SEC, value: "0.5"}
+            - {name: RATE_BURST, value: "5"}
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}          # agent is I/O-bound: mostly waiting on the LLM
+            limits: {memory: 512Mi}                       # memory limit only; CPU limits cause throttling latency
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:                                  # restart if the process is wedged
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:                                 # remove from load balancer if not ready
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+          lifecycle:
+            preStop:
+              exec: {command: ["sleep", "10"]}            # allow LB to deregister before SIGTERM
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 200Mi}
+      topologySpreadConstraints:                          # spread replicas across zones/nodes
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app: supportops-agent}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: supportops-agent
+spec:
+  selector: {app: supportops-agent}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: supportops-agent
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: {app: supportops-agent}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: supportops-agent
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: supportops-agent}
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 60}}
+  # NOTE: CPU is a weak signal for I/O-bound agents. Better: scale on in-flight requests / queue depth
+  # (KEDA + Prometheus/SQS). Also watch your LLM provider rate limits: more pods != more capacity.
+  behavior:
+    scaleDown: {stabilizationWindowSeconds: 300}
+---
+# Default-deny networking: only ingress-controller -> app, and app -> DNS + HTTPS egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: supportops-agent
+spec:
+  podSelector: {matchLabels: {app: supportops-agent}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress-nginx}}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}   # Prometheus scrape
+      ports: [{port: 8080}]
+  egress:
+    - to: [{namespaceSelector: {}}]
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    - ports: [{port: 443}]        # LLM provider. Tighten with an egress proxy/allow-listed FQDNs in real clusters

@@ -1,0 +1,7 @@
+openai>=1.50
+azure-identity>=1.17
+langfuse>=3.0
+anthropic>=1.0.0
+langgraph>=0.2
+mcp>=2.0
+pytest>=8.0

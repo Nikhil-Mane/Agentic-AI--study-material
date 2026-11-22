@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "namePrefix": { "value": "supportops" },
+    "appEnv": { "value": "prod" },
+    "openAIModelName": { "value": "gpt-4o" },
+    "openAIModelVersion": { "value": "2024-11-20" },
+    "openAIDeploymentName": { "value": "support-agent" },
+    "openAICapacity": { "value": 50 },
+    "langfuseHost": { "value": "https://cloud.langfuse.com" },
+    "minReplicas": { "value": 2 },
+    "maxReplicas": { "value": 20 }
+  }
+}

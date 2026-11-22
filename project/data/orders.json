@@ -1,0 +1,7 @@
+{
+  "ORD-1001": {"customer_id": "C-1", "status": "delivered", "delivered_on": "2026-11-05", "total": 29.99,  "items": ["USB-C cable (2-pack)"]},
+  "ORD-1002": {"customer_id": "C-1", "status": "delivered", "delivered_on": "2026-11-08", "total": 189.00, "items": ["Noise-cancelling headphones"]},
+  "ORD-1003": {"customer_id": "C-1", "status": "shipped",   "delivered_on": null,         "total": 59.00,  "items": ["Desk lamp"]},
+  "ORD-1004": {"customer_id": "C-1", "status": "delivered", "delivered_on": "2026-08-01", "total": 45.00,  "items": ["Phone case"]},
+  "ORD-2001": {"customer_id": "C-2", "status": "delivered", "delivered_on": "2026-11-09", "total": 15.00,  "items": ["Notebook"]}
+}

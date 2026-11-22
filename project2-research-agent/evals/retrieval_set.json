@@ -1,0 +1,12 @@
+[
+  {"query": "How many days a week can I work from home?", "expected_doc": "remote_work"},
+  {"query": "my laptop got stolen what should I do", "expected_doc": "security"},
+  {"query": "what is the daily limit for meals on a business trip", "expected_doc": "expenses"},
+  {"query": "can I carry over unused vacation days", "expected_doc": "leave"},
+  {"query": "how long do I have to submit receipts for the desk stipend", "expected_doc": "remote_work"},
+  {"query": "am I allowed to share a password in slack", "expected_doc": "security"},
+  {"query": "how many sick days do I get", "expected_doc": "leave"},
+  {"query": "maximum hotel price per night", "expected_doc": "expenses"},
+  {"query": "working from another country for a month", "expected_doc": "remote_work"},
+  {"query": "who approves large purchases", "expected_doc": "expenses"}
+]

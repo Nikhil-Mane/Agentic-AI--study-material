@@ -1,0 +1,22 @@
+# Local / single-host deployment:  docker compose up --build
+services:
+  api:
+    build: .
+    ports: ["8080:8080"]
+    environment:
+      LLM_PROVIDER: azure
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:?set AZURE_OPENAI_ENDPOINT}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-support-agent}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:?local dev uses a key; Azure deployment uses managed identity}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      API_KEYS: ${API_KEYS:-{"dev-key-1":"C-1","dev-key-2":"C-2"}}
+      RATE_PER_SEC: "0.5"
+      RATE_BURST: "5"
+    read_only: true                  # immutable root filesystem
+    tmpfs: ["/tmp"]                  # traces land here (ship to stdout/OTel in real deployments)
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    restart: unless-stopped

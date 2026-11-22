@@ -1,0 +1,117 @@
+# Pipeline: test -> (manual) live evals -> build in ACR -> deploy staging -> manual approval -> deploy prod
+# Azure auth is OIDC federation (azure/login) - NO long-lived cloud secrets in GitHub.
+#   One-time setup: create an Entra app registration (or managed identity) with a federated credential for this repo
+#   + environment, grant it Contributor on the resource group (or narrower: AcrPush + Container Apps Contributor),
+#   then set repo/environment variables: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+#   AZURE_RESOURCE_GROUP, AZURE_ACR_NAME, AZURE_APP_NAME (per environment: staging / production).
+# Paths assume this folder is the repo root and the app lives in ./project (adjust if you move it).
+name: ci-cd-azure
+on:
+  pull_request:
+  push: {branches: [main]}
+  workflow_dispatch:
+    inputs:
+      run_live_evals: {description: "Run real-model evals against Azure OpenAI (costs money)", type: boolean, default: false}
+
+permissions:
+  id-token: write        # OIDC
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: project}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - run: SUPPORTOPS_TODAY=2026-11-12 pytest -q        # unit + scripted-LLM + Azure adapter + Langfuse + API: free, deterministic
+      - name: Validate infrastructure template
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
+
+  live-evals:                                             # gate prompt/model/tool changes on REAL behaviour
+    if: github.event_name == 'workflow_dispatch' && inputs.run_live_evals
+    needs: test
+    runs-on: ubuntu-latest
+    environment: staging
+    defaults: {run: {working-directory: project}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - run: pip install -r requirements-prod.txt
+      - run: python evals/run_evals.py --runs 3           # DefaultAzureCredential picks up the az login session
+        env:
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+          # Point LANGFUSE_* at a separate "ci" project so eval traces don't pollute production dashboards
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_CI_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_CI_SECRET_KEY }}
+          APP_ENV: ci
+
+  build:
+    if: github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs: {tag: "${{ steps.v.outputs.tag }}"}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"          # immutable tag = git sha, never :latest
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Build in ACR (no Docker daemon needed)
+        run: az acr build -r "${{ vars.AZURE_ACR_NAME }}" -t "supportops-agent:${{ steps.v.outputs.tag }}" project
+      # Add: image vulnerability scan (Defender for Containers / Trivy), SBOM, signing (cosign / Notation) before deploy.
+
+  deploy-staging:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy new revision (rolling; traffic shifts only after readiness probe passes)
+        run: |
+          IMG="${{ vars.AZURE_ACR_NAME }}.azurecr.io/supportops-agent:${{ needs.build.outputs.tag }}"
+          az containerapp update -g "${{ vars.AZURE_RESOURCE_GROUP }}" -n "${{ vars.AZURE_APP_NAME }}" \
+            --image "$IMG" --set-env-vars APP_VERSION="${{ needs.build.outputs.tag }}"
+      - name: Smoke test
+        run: |
+          FQDN=$(az containerapp show -g "${{ vars.AZURE_RESOURCE_GROUP }}" -n "${{ vars.AZURE_APP_NAME }}" --query properties.configuration.ingress.fqdn -o tsv)
+          for i in $(seq 1 12); do curl -fsS "https://$FQDN/readyz" && exit 0; sleep 10; done; exit 1
+
+  deploy-prod:
+    needs: [build, deploy-staging]
+    runs-on: ubuntu-latest
+    environment: production                              # configure Required reviewers = manual approval gate
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy (previous revision keeps serving if the new one never becomes ready)
+        run: |
+          IMG="${{ vars.AZURE_ACR_NAME }}.azurecr.io/supportops-agent:${{ needs.build.outputs.tag }}"
+          az containerapp update -g "${{ vars.AZURE_RESOURCE_GROUP }}" -n "${{ vars.AZURE_APP_NAME }}" \
+            --image "$IMG" --set-env-vars APP_VERSION="${{ needs.build.outputs.tag }}"
+      - name: Smoke test + synthetic conversation
+        run: |
+          FQDN=$(az containerapp show -g "${{ vars.AZURE_RESOURCE_GROUP }}" -n "${{ vars.AZURE_APP_NAME }}" --query properties.configuration.ingress.fqdn -o tsv)
+          for i in $(seq 1 12); do curl -fsS "https://$FQDN/readyz" && break; sleep 10; done
+          # then watch Langfuse/Azure Monitor for error rate, latency, tokens/run, guardrail scores before the next release
+      # Rollback: az containerapp revision list ...; set traffic to the previous revision (use Multiple revision mode for canary).
